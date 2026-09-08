@@ -22,7 +22,7 @@ Your landing zone has already been bootstrapped with baseline data assets via Mo
 > [!IMPORTANT]
 > **Project Parameterization:** Always replace `<PROJECT_ID>` with your assigned GCP Project ID in your SQL queries. Do not alter dataset names (`cymbal_gold`, `module1_unstructureddata`, `cymbal-lakehouse.elevate_data`) or table names.
 
-> [!CRITICAL]
+> [!WARNING]
 > **Data Agent Location Override Requirement (mTLS Error Mitigation):**  
 > Even if your BigQuery datasets (`cymbal_gold`, `module1_unstructureddata`) and tables are created in `us-central1`, you **MUST create your BigQuery Conversational Data Agent (BQ CA Agent) with `global` as the location** by overriding the default location setting in the BigQuery Studio UI.  
 > *Why?* Creating your Data Agent with `global` location (`projects/<PROJECT_ID>/locations/global/dataAgents/<DATA_AGENT_ID>`) ensures seamless API routing and completely avoids mTLS / SSL certificate errors associated with regional endpoint routing.
