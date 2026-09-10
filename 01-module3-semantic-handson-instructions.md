@@ -74,6 +74,31 @@ Once the profiling scan is complete, verify the generated metadata in the GCP Co
 - **Batch Multi-Table Profiling:** In BigQuery Console > **Metadata curation** > **Data profiling & Quality** (or Knowledge Catalog Console > **Data profile & quality**), you can create profile scans for multiple tables simultaneously using the **Multiple data profile scans** option. (Note: This feature only supports tables within the same dataset. For tables in different datasets, you must create separate profile scans.)
 - **Streaming Table Sampling Considerations:** Depending on whether real-time data is actively writing to the streaming buffer, partial sampling (such as 10%) can intermittently return `TABLESAMPLE is not supported for tables with a streaming buffer`. If you encounter this error, adjust the data sampling option to **`All data` (Full Scan)** and retry.
 
+#### 🚀 Successfully Executed Steps & Evidence (Lab Completed)
+- **Target Project:** `xiaoyj-lab` | **Location:** `us-central1`
+- **Data Scans Created & Executed:**
+  1. `pos-transactions-gold-profile` (Table: `xiaoyj-lab.cymbal_gold.pos_transactions_gold`)
+  2. `pos-anomaly-alerts-profile` (Table: `xiaoyj-lab.cymbal_gold.pos_anomaly_alerts`)
+  3. `gold-inventory-reconciliation-ledger-profile` (Table: `xiaoyj-lab.cymbal_gold.gold_inventory_reconciliation_ledger`)
+  4. `historical-transactional-data-profile` (Table: `xiaoyj-lab.cymbal_gold.historical_transactional_data`)
+- **Execution Settings Applied:**
+  - **Catalog Publishing:** Enabled (`catalogPublishingEnabled: true`)
+  - **Sampling Configuration:** Full Scan (`--sampling-percent=100`) to resolve the streaming buffer limitation (`TABLESAMPLE is not supported for tables with a streaming buffer`).
+  - **BigQuery Export Destination:** `//bigquery.googleapis.com/projects/xiaoyj-lab/datasets/cymbal_governance/tables/profile_results`
+- **Execution & Verification Output:**
+  - All 4 scan jobs completed with `JOB_STATUS: SUCCEEDED`.
+  - Verified BigQuery export table `xiaoyj-lab.cymbal_governance.profile_results`:
+    ```
+    +----------------------------------------------+--------------------------------------+----------------------+
+    | scan_id                                      | table_id                             | column_metrics_count |
+    +----------------------------------------------+--------------------------------------+----------------------+
+    | gold-inventory-reconciliation-ledger-profile | gold_inventory_reconciliation_ledger | 12                   |
+    | historical-transactional-data-profile        | historical_transactional_data        | 32                   |
+    | pos-anomaly-alerts-profile                   | pos_anomaly_alerts                   | 9                    |
+    | pos-transactions-gold-profile                | pos_transactions_gold                | 22                   |
+    +----------------------------------------------+--------------------------------------+----------------------+
+    ```
+
 ---
 
 ### Challenge 1.2: Build Retail Domain Data Quality Scan
@@ -104,6 +129,28 @@ Verify that the DQ scan successfully executed and applied your custom rules:
 * Navigate to the **Data Quality** tab of the `.cymbal_gold.pos_transactions_gold` table in the BigQuery Console.
 * Review the latest scan results to confirm that both the baseline rules and your Custom SQL business integrity rules were evaluated.
 * Inspect the rule-level details to see the pass/fail status and row-level quality metrics provided directly in the UI.
+
+#### 🚀 Successfully Executed Steps & Evidence (Lab Completed)
+- **Target Project:** `xiaoyj-lab` | **Location:** `us-central1`
+- **Data Quality Scan Created:** `pos-transactions-quality-scan` on table `xiaoyj-lab.cymbal_gold.pos_transactions_gold`
+- **3 Evaluated Rules:**
+  1. **[Completeness] Identifier Missing Value Check:**
+     - Column: `transaction_id`
+     - Specification: `nonNullExpectation: {}`
+  2. **[Business Integrity] Payment Amount Integrity:**
+     - Rule Type: `SQL row check`
+     - Specification: `total = subtotal_amount - discount + tax_amount`
+  3. **[Business Integrity] Cart Quantity Integrity:**
+     - Rule Type: `SQL row check`
+     - Specification: `item_count <= total_quantity`
+- **Execution & Evaluation Results:**
+  - **Job ID:** `96556f50-b311-47d6-ad3b-f68df0ebece9` (`state: SUCCEEDED`)
+  - **Evaluated Row Count:** 2,757 rows
+  - **Overall Quality Score:** `100.0%`
+  - **Rule-level Breakdown:**
+    - `transaction_id IS NOT NULL`: 2,757 / 2,757 passed (Pass Ratio: 100%)
+    - `total = subtotal_amount - discount + tax_amount`: 2,757 / 2,757 passed (Pass Ratio: 100%)
+    - `item_count <= total_quantity`: 2,757 / 2,757 passed (Pass Ratio: 100%)
 
 ---
 
@@ -142,6 +189,23 @@ Verify the generated insights and validate the metadata best practices in BigQue
 * **Inspect Profiling Grounding (Example Values in Descriptions):** Verify that the generated column descriptions include real-world **example values, valid ranges, or format representations**. This confirms that Gemini Data Insights actively grounds its description generation on the **Data Profiling results (null rates, distinct value cardinality, and min/max stats)** produced in Challenge 1.1.
 * **Validate Documentation Best Practices:** Confirm firsthand the principles documented in [Google Cloud Best Practices for Generating Data Insights](https://docs.cloud.google.com/bigquery/docs/generate-table-insights#best_practices_for_generating_data_insights): that **(1) providing a comprehensive table description beforehand** and **(2) running data profile scans in advance** are the key prerequisites for generating the highest-quality AI metadata and insights.
 * **Inspect Dataset ERD Relationship Graph:** In the `cymbal_gold` dataset **Insights** tab, review the visual Relationship Graph (ERD) and suggested join queries to ensure Gemini accurately identified cross-table transactional relationships.
+
+#### 🚀 Successfully Executed Steps & Evidence (Lab Completed)
+- **Target Project:** `xiaoyj-lab` | **Location:** `us-central1`
+- **1. Standard Table Descriptions Configured & Verified:**
+  - `pos_transactions_gold`: `"Real-time streaming intraday POS sales transactions with customer PII for daily store revenue and sales KPI monitoring. (Use for today's sales and daily revenue KPIs)."`
+  - `historical_transactional_data`: `"Historical customer item purchase transactions used strictly for product warranty claims triage and returns eligibility. (Use for customer purchase verification in warranty workflows)."`
+  - `pos_anomaly_alerts`: `"Historical multi-day cashier anomaly and promo abuse alert ledger (partitioned by alert_ts). Primary table for multi-day trend analysis, 7-day/30-day top offender rankings, and historical override rate calculations. (NOTE: For real-time 1-hour live audit status and streaming flags, query Cloud Bigtable operational cache)."`
+  - `gold_inventory_reconciliation_ledger`: `"Daily reconciled store inventory ledger tracking opening balance, shelf/backroom quantities, intraday revenue, and remaining cover hours for stockout risk analysis."`
+  - `warranty_generic_sections_extracted`: `"Extracted product warranty policy terms, coverage duration in months, service levels, exclusions, and official support URLs for warranty claim evaluation."`
+- **2. Gemini Data Insights Scans Created & Executed:**
+  - `pos-transactions-gold-docs` (`SUCCEEDED`)
+  - `pos-anomaly-alerts-docs` (`SUCCEEDED`)
+  - `gold-inventory-reconciliation-ledger-docs` (`SUCCEEDED`)
+  - `historical-transactional-data-docs` (`SUCCEEDED`)
+  - `warranty-generic-sections-extracted-docs` (`SUCCEEDED`)
+- **3. Schema Column Descriptions Persisted:**
+  - AI-generated column descriptions across all 5 tables were permanently saved directly into the BigQuery table schemas via BigQuery API PATCH (e.g., 22 columns in `pos_transactions_gold`, 12 columns in `gold_inventory_reconciliation_ledger`, 9 in `pos_anomaly_alerts`, 32 in `historical_transactional_data`, 18 in `warranty_generic_sections_extracted`).
 
 ---
 
@@ -188,6 +252,24 @@ After attaching aspects to tables, verify that resources associated with the Asp
 2. **Structured Aspect Search Syntax:**
    - You can also query directly in the search bar using aspect search syntax. Refer to the [Knowledge Catalog Aspect Search Syntax Documentation](https://docs.cloud.google.com/dataplex/docs/search-syntax#aspect-search) for full syntax rules.
 
+#### 🚀 Successfully Executed Steps & Evidence (Lab Completed)
+- **Target Project:** `xiaoyj-lab` | **Location:** `us-central1`
+- **Aspect Type Created:**
+  - Resource: `projects/xiaoyj-lab/locations/us-central1/aspectTypes/table-operational-spec`
+  - Display Name: `Table Operational Spec`
+  - Strongly typed schema fields:
+    - `table_type`: Enum (`STREAMING_TABLE`, `BATCH_TABLE`), required
+    - `pii_included`: Boolean, required
+    - `data_owner_team`: Enum (`store-ops`, `inventory-mgmt`, `loss-prevention`), required
+- **Aspect Attached Across All 5 Tables (`@bigquery` entry group):**
+  1. `pos_transactions_gold`: `table_type: STREAMING_TABLE`, `pii_included: true`, `data_owner_team: store-ops`
+  2. `pos_anomaly_alerts`: `table_type: STREAMING_TABLE`, `pii_included: false`, `data_owner_team: loss-prevention`
+  3. `gold_inventory_reconciliation_ledger`: `table_type: BATCH_TABLE`, `pii_included: false`, `data_owner_team: inventory-mgmt`
+  4. `historical_transactional_data`: `table_type: BATCH_TABLE`, `pii_included: true`, `data_owner_team: store-ops`
+  5. `warranty_generic_sections_extracted`: `table_type: BATCH_TABLE`, `pii_included: false`, `data_owner_team: store-ops`
+- **Verification:**
+  - All 5 table entries were verified via `gcloud dataplex entries lookup --view=custom`, confirming exact enum and boolean aspect attachments.
+
 ---
 
 ### Challenge 1.5: Business Glossary Standardization & Related Entries Binding
@@ -231,6 +313,30 @@ Ensure the business terms and their relationships to physical tables and columns
 * For table-level terms (e.g., `net-transaction-revenue`), click on the term and verify the BigQuery table (`pos_transactions_gold`) is listed under **Related entries**.
 * For the column-level term (`warranty-policy-duration`), click on the term and verify that the specific column (`warranty_generic_sections_extracted` > `warranty_duration_months`) is explicitly bound under **Related entries**.
 
+#### 🚀 Successfully Executed Steps & Evidence (Lab Completed)
+- **Target Project:** `xiaoyj-lab` | **Location:** `us-central1`
+- **Glossary Created:**
+  - Resource: `projects/xiaoyj-lab/locations/us-central1/glossaries/cymbal-retail-glossary`
+  - Display Name: `Cymbal Retail Glossary`
+- **3 Categories Created:**
+  1. `projects/xiaoyj-lab/locations/us-central1/glossaries/cymbal-retail-glossary/categories/store-ops` (`Store Operations`)
+  2. `projects/xiaoyj-lab/locations/us-central1/glossaries/cymbal-retail-glossary/categories/inventory-mgmt` (`Inventory Management`)
+  3. `projects/xiaoyj-lab/locations/us-central1/glossaries/cymbal-retail-glossary/categories/loss-prevention` (`Loss Prevention`)
+- **5 Standardized Terms Created:**
+  1. `net-transaction-revenue` (Category: `store-ops`)
+  2. `total-on-hand-inventory` (Category: `inventory-mgmt`)
+  3. `inventory-cover-hours` (Category: `inventory-mgmt`)
+  4. `cashier-override-rate` (Category: `loss-prevention`)
+  5. `warranty-policy-duration` (Category: `store-ops`)
+- **Related Entries EntryLinks Bound (`definition` link type):**
+  1. `link-net-rev`: Bound `pos_transactions_gold` -> `net-transaction-revenue`
+  2. `link-total-on-hand-inv`: Bound `gold_inventory_reconciliation_ledger` -> `total-on-hand-inventory`
+  3. `link-inv-cover-hours`: Bound `gold_inventory_reconciliation_ledger` -> `inventory-cover-hours`
+  4. `link-cashier-override`: Bound `pos_anomaly_alerts` -> `cashier-override-rate`
+  5. `link-warranty-col`: Bound `warranty_generic_sections_extracted` column `Schema.warranty_duration_months` (Column-Level Binding) -> `warranty-policy-duration`
+- **Verification:**
+  - All 5 entry links described and confirmed with `gcloud alpha dataplex entry-links describe`, showing SOURCE and TARGET relationships mapped properly between tables/columns and glossary terms.
+
 ---
 
 ## ✅ Part 2: Final Acceptance Criteria (Core Lab)
@@ -240,12 +346,12 @@ Verify your core lab completion against the checklist below:
 > [!NOTE]
 > **Console Verification Verification:** The completion criteria assess not only the successful execution of CLI/API commands, but whether the resulting metadata and scan outcomes are accurately reflected and visually confirmed directly in the Google Cloud Console (BigQuery Studio & Knowledge Catalog).
 
-- [ ] **Data Profile Scan:** Profile scan created/executed via GCP Console UI, profile statistics verified in BigQuery Console under each table's Profile tab, and scan results confirmed in the exported BigQuery table?
-- [ ] **Data Quality Scan:** 3 core quality rules executed, validating identifier completeness (Built-in Null check) and net payment / cart quantity integrity (SQL row check)?
-- [ ] **Gemini Data Insights & ERD:** Table-level Insights on all 5 core analytical tables and dataset-level Insights published in BigQuery Studio with ERD graph and schema descriptions?
-- [ ] **Knowledge Catalog Aspect:** `table-operational-spec` Aspect Type created and bound with operational metadata across all 5 tables?
-- [ ] **Aspect Search:** Tables accurately retrieved via Knowledge Catalog UI Search filtering?
-- [ ] **Business Glossary:** `cymbal-retail-glossary` populated with 5 core terms using standardized description templates and bound Related Entries (4 tables and 1 column)?
+- [x] **Data Profile Scan:** Profile scan created/executed via GCP Console UI, profile statistics verified in BigQuery Console under each table's Profile tab, and scan results confirmed in the exported BigQuery table?
+- [x] **Data Quality Scan:** 3 core quality rules executed, validating identifier completeness (Built-in Null check) and net payment / cart quantity integrity (SQL row check)?
+- [x] **Gemini Data Insights & ERD:** Table-level Insights on all 5 core analytical tables and dataset-level Insights published in BigQuery Studio with ERD graph and schema descriptions?
+- [x] **Knowledge Catalog Aspect:** `table-operational-spec` Aspect Type created and bound with operational metadata across all 5 tables?
+- [x] **Aspect Search:** Tables accurately retrieved via Knowledge Catalog UI Search filtering?
+- [x] **Business Glossary:** `cymbal-retail-glossary` populated with 5 core terms using standardized description templates and bound Related Entries (4 tables and 1 column)?
 
 ---
 

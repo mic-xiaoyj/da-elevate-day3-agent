@@ -54,6 +54,28 @@ Create and scope the **`Cymbal Retail Analytics Data Agent`** in BigQuery Studio
 - If you omit `cymbal-lakehouse.elevate_data`, the Data Agent will be unable to discover the cross-cloud AWS S3 schema.
 - **Important Location Selection:** Under **Location**, override the default regional dropdown and explicitly select **`global`**.
 
+#### 🚀 Successfully Executed Steps & Evidence (Lab Completed)
+- **Target Project:** `xiaoyj-lab` | **Resource Location:** `global` (configured globally to avoid regional endpoint mTLS routing collisions)
+- **Agent Resource Name & ID:** `projects/xiaoyj-lab/locations/global/dataAgents/cymbal-retail-analytics`
+- **Agent Display Name:** `Cymbal Retail Analytics Data Agent`
+- **Data Assets Scoped (6 Tables across 3 Layers):**
+  1. `xiaoyj-lab.cymbal_gold.pos_transactions_gold` (Real-time intraday POS checkout ledger)
+  2. `xiaoyj-lab.cymbal_gold.pos_anomaly_alerts` (Real-time anomaly & promo abuse alert ledger)
+  3. `xiaoyj-lab.cymbal_gold.gold_inventory_reconciliation_ledger` (Daily reconciled store inventory & burn-rate ledger)
+  4. `xiaoyj-lab.cymbal_gold.historical_transactional_data` (Historical customer transaction ledger)
+  5. `xiaoyj-lab.module1_unstructureddata.warranty_generic_sections_extracted` (AI-extracted warranty terms & conditions)
+  6. `xiaoyj-lab.cymbal-lakehouse.elevate_data.silver_pos_transactions` (Cross-cloud AWS S3 Iceberg BigLake federated table)
+- **API Verification Evidence:**
+  ```json
+  {
+    "name": "projects/xiaoyj-lab/locations/global/dataAgents/cymbal-retail-analytics",
+    "displayName": "Cymbal Retail Analytics Data Agent",
+    "hasStaging": true,
+    "hasPublished": true,
+    "tableCount": 6
+  }
+  ```
+
 ---
 
 ## 🏷️ Part 2: Governance & System Instructions Configuration
@@ -80,6 +102,14 @@ Your system instructions must include 5 core sections:
 
 #### 💡 Hints & Clues
 - System instructions guide the LLM's query generation strategy. Frame rules around **methodologies** (e.g. *"Join purchase facts with policy terms and calculate elapsed warranty months"*) rather than hardcoding exact filter constants into general routing rules.
+
+#### 🚀 Successfully Executed Steps & Evidence (Lab Completed)
+- **Configured System Instructions:** Formulated and deployed intent-driven system instructions covering all 5 core governance sections:
+  1. **Role & Scope:** Explicitly restricted data agent scope to `xiaoyj-lab.cymbal_gold`, `xiaoyj-lab.module1_unstructureddata`, and `xiaoyj-lab.cymbal-lakehouse.elevate_data`.
+  2. **Table Selection Matrix:** Mapped user analytical intents to target tables, partition filters (`business_date = CURRENT_DATE()`), dynamic lookback windows (`alert_ts >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)`), and repeated array unnesting (`UNNEST(tx.items)`).
+  3. **Warranty Triage Methodology (UC 2.1):** Grounded multi-step join pattern: unnest purchase facts -> join policy terms ON `item.item_id = warr.product_id` -> calculate `DATE_DIFF(CURRENT_DATE(), tx.business_date, MONTH) <= warr.warranty_duration_months`.
+  4. **Cross-Cloud Audit Methodology (UC 2.3):** Two-phase workflow: Step 1 anomaly ranking in GCP `pos_anomaly_alerts` -> Step 2 external checkout query in federated AWS S3 `silver_pos_transactions`.
+  5. **Governance Standards & Limiting:** Strict READ-ONLY GoogleSQL execution, session isolation, and default `LIMIT 20` with multi-tier ordering (`intraday_gross_revenue_usd DESC`, `risk_score DESC`, `est_cover_hours_remaining ASC`).
 
 ---
 
@@ -136,6 +166,27 @@ Construct and register Golden Queries for **at least the 5 core business prompts
 #### **Prompt 5+ (Optional Additional Golden Queries)**
 * *Construct your own analytical queries* over intraday checkouts (`pos_transactions_gold`), supplier warranty durations, or store revenue performance to further enhance your Data Agent's prompt library!
 
+#### 🚀 Successfully Executed Steps & Evidence (Lab Completed)
+- **Registered Golden Queries Library:** Deployed 6 high-performance pre-verified GoogleSQL query blueprints under `exampleQueries`:
+  1. **Prompt 1 (UC 1.2 Store Inventory Stockout Risk):**
+     - Prompt: *"What is the estimated cover hours remaining for store inventory positions experiencing stockout risk of less than 20 hours, and what is their total on-hand inventory?"*
+     - SQL: Queries `gold_inventory_reconciliation_ledger`, filters `est_cover_hours_remaining < 20.0`, calculates `(shelf_qty + backroom_qty) AS total_on_hand_inventory`, ordered by `intraday_gross_revenue_usd DESC, est_cover_hours_remaining ASC LIMIT 20`.
+  2. **Prompt 2A (UC 2.1 Past Warranty Lookup by Transaction ID):**
+     - Prompt: *"Check transaction details for TXN-20260312-0015811 and show the warranty coverage policy for the purchased item."*
+     - SQL: Flattens `tx.items` from `historical_transactional_data` via `UNNEST(tx.items) AS item`, joins `warranty_generic_sections_extracted` on `product_id`, filters by transaction ID.
+  3. **Prompt 2B (UC 2.1 Past Warranty Lookup by Customer ID):**
+     - Prompt: *"Customer CUST_00386 purchased an item at Store 9 using a Gift Card.. Is their item covered under warranty?"*
+     - SQL: Relational join with `DATE_DIFF` month calculation and `CASE WHEN ... <= warranty_duration_months THEN 'COVERED' ELSE 'EXPIRED' END`.
+  4. **Prompt 3 (UC 2.3 Step 1 Top Promo Abuse Offender Ranking in GCP):**
+     - Prompt: *"Show cashiers with active cashier promo abuse alerts in the last 7 days and rank the top offending cashiers."*
+     - SQL: Queries `pos_anomaly_alerts`, filters for `cashier_promo_abuse` in the last 7 days, groups by cashier & store, and orders by `alert_count DESC, avg_risk_score DESC LIMIT 20`.
+  5. **Prompt 4 (UC 2.3 Step 2 Cross-Cloud AWS S3 Checkout Audit):**
+     - Prompt: *"Retrieve historical checkout transaction logs for top promo abuse offender Cashier CASH_1164."*
+     - SQL: Federated BigLake / Iceberg query against `cymbal-lakehouse.elevate_data.silver_pos_transactions` filtering directly on `cashier_id = 'CASH_1164'`.
+  6. **Prompt 5 (Bestselling Items Intraday):**
+     - Prompt: *"What are the top 10 bestselling items by total sales amount today across all stores?"*
+     - SQL: Intraday checkout aggregation on `pos_transactions_gold` partitioned by `business_date = CURRENT_DATE()`.
+
 ---
 
 ## 🏷️ Part 4: Semantic Metric Verification & Custom Terms (Glossary)
@@ -165,6 +216,18 @@ If you wish to test custom inline glossary creation:
    - **Definition:** `[Definition]: Percentage of total on-hand store inventory units placed on retail sales floor shelves. - Target Table: gold_inventory_reconciliation_ledger - Calculation Formula: SAFE_DIVIDE(shelf_qty, (shelf_qty + backroom_qty)) * 100`
 3. Click **Add** to save the term and observe how the Data Agent leverages inline definitions alongside catalog-synced terms during SQL generation.
 
+#### 🚀 Successfully Executed Steps & Evidence (Lab Completed)
+- **Knowledge Catalog Synced Terms & Custom Metrics Configured:**
+  - **Catalog-Synced Enterprise Terms (Challenge 4.1):**
+    1. `Net Transaction Revenue`: Subtotal minus discount plus tax amount (`subtotal_amount - discount + tax_amount`) mapped to `pos_transactions_gold`.
+    2. `Estimated Inventory Cover Hours`: Operational runway in hours remaining (`est_cover_hours_remaining`) mapped to `gold_inventory_reconciliation_ledger`.
+    3. `Cashier Promo Override Rate`: Frequency of cashier promo overrides mapped to `pos_anomaly_alerts`.
+    4. `Total On-Hand Inventory`: Combined units across sales floor shelves and backroom storage (`shelf_qty + backroom_qty`) mapped to `gold_inventory_reconciliation_ledger`.
+    5. `Warranty Policy Duration`: Guaranteed service coverage SLA in months (`warranty_duration_months`) mapped to `warranty_generic_sections_extracted`.
+  - **Custom Agent-Specific Inline Term (Challenge 4.2):**
+    - **Term Name:** `Shelf Stock Ratio`
+    - **Labels:** `["inventory-mgmt"]`
+    - **Definition & Formula:** `[Definition]: Percentage of total on-hand store inventory units placed on retail sales floor shelves. - Target Table: gold_inventory_reconciliation_ledger - Calculation Formula: SAFE_DIVIDE(shelf_qty, (shelf_qty + backroom_qty)) * 100`
 
 ---
 
@@ -287,3 +350,159 @@ ORDER BY event_timestamp ASC
 LIMIT 10;
 ```
 * **Verification Criteria:** The agent queries `pos_anomaly_alerts` for the GCP ranking step, and routes the cross-cloud query to `cymbal-lakehouse.elevate_data.silver_pos_transactions` querying AWS S3 directly via BigLake federation.
+
+---
+
+### 🚀 Successfully Executed Steps & Evidence (Lab Completed)
+
+#### 1. Data Agent Publishing Status
+- **Data Agent:** `projects/xiaoyj-lab/locations/global/dataAgents/cymbal-retail-analytics`
+- **Publish Status:** Verified active in `publishedContext` and accessible via the global Conversational Analytics chat endpoint (`https://geminidataanalytics.googleapis.com/v1/projects/xiaoyj-lab/locations/global:chat`).
+
+#### 2. Live Interactive Validation Execution Results
+
+##### **Test Case 1: UC 1.2 Store Inventory Stockout Analysis**
+* **Prompt:**  
+  `What is the estimated cover hours remaining for store inventory positions experiencing stockout risk of less than 20 hours, and what is their total on-hand inventory?`
+* **Generated GoogleSQL:**
+  ```sql
+  SELECT store_id,
+         store_name,
+         city,
+         item_id,
+         shelf_qty,
+         backroom_qty,
+         (shelf_qty + backroom_qty) AS total_on_hand_inventory,
+         intraday_gross_revenue_usd,
+         est_cover_hours_remaining,
+         reconciliation_status
+  FROM `xiaoyj-lab.cymbal_gold.gold_inventory_reconciliation_ledger`
+  WHERE est_cover_hours_remaining < 20.0
+  ORDER BY intraday_gross_revenue_usd DESC,
+           est_cover_hours_remaining ASC
+  LIMIT 20;
+  ```
+* **Execution Metric:** Returned **20 rows in 1.22s**.
+* **Agent Response:**  
+  > *"Here is the estimated cover hours remaining and total on-hand inventory for store inventory positions experiencing stockout risk of less than 20 hours (showing the top 20 by intraday gross revenue), adapted from the standard inventory risk assessment query."*
+
+---
+
+##### **Test Case 2: UC 2.1 Past Purchase & Warranty Policy Triage (Prompt 2A)**
+* **Prompt:**  
+  `Check transaction details for TXN-20260312-0015811 and show the warranty coverage policy for the purchased item.`
+* **Generated GoogleSQL:**
+  ```sql
+  SELECT tx.transaction_id,
+         tx.business_date,
+         tx.customer_loyalty_tier,
+         tx.store_id,
+         tx.payment_method,
+         item.item_id AS product_id,
+         item.item_name AS product_name,
+         item.unit_price,
+         warr.warranty_duration_months,
+         warr.service_level,
+         warr.coverage_scope_details,
+         warr.exclusions_and_limitations,
+         warr.official_retailer_guarantee_and_sla,
+         warr.support_url
+  FROM `xiaoyj-lab.cymbal_gold.historical_transactional_data` tx,
+       UNNEST(tx.items) AS item
+  JOIN `xiaoyj-lab.module1_unstructureddata.warranty_generic_sections_extracted` warr ON item.item_id = warr.product_id
+  WHERE tx.transaction_id = 'TXN-20260312-0015811'
+  LIMIT 1;
+  ```
+* **Execution Metric:** Returned **1 row in 1.77s**.
+* **Agent Response:**  
+  > *"Transaction **TXN-20260312-0015811** on **2026-03-12** recorded the purchase of a **Samsung Galaxy Watch4 Classic LTE (4.6cm, Black)** (Product ID: `prod_1954`) for **$222.99** at store `STORE_005` using a `DEBIT_CARD` by a `BRONZE` tier customer.  
+  > **Warranty Coverage Highlights:**  
+  > - **Warranty Duration:** 24 Months Limited Hardware Warranty.  
+  > - **Service Level:** Authorized Audio Lab Testing & Immediate Unit Replacement.  
+  > - **Coverage Scope:** Comprehensive protection against defects in materials and workmanship under normal consumer use. Includes free repair using new/certified refurbished parts or immediate unit replacement.  
+  > - **Exclusions:** Excludes accidental damage, abuse, cosmetic damage, and normal consumable battery wear."*
+
+---
+
+##### **Test Case 3: UC 2.1 Customer Warranty Eligibility Verification (Prompt 2B)**
+* **Prompt:**  
+  `Customer CUST_00386 purchased an item at Store 9 using a Gift Card.. Is their item covered under warranty?`
+* **Generated GoogleSQL:**
+  ```sql
+  SELECT tx.transaction_id,
+         tx.customer_id,
+         tx.store_id,
+         tx.payment_method,
+         item.item_id AS product_id,
+         item.item_name AS product_name,
+         tx.business_date,
+         warr.warranty_duration_months,
+         DATE_DIFF(CURRENT_DATE(), tx.business_date, MONTH) AS elapsed_months,
+         CASE
+             WHEN DATE_DIFF(CURRENT_DATE(), tx.business_date, MONTH) <= warr.warranty_duration_months THEN 'COVERED'
+             ELSE 'EXPIRED'
+         END AS warranty_status,
+         warr.coverage_scope_details,
+         warr.support_url
+  FROM `xiaoyj-lab.cymbal_gold.historical_transactional_data` tx,
+       UNNEST(tx.items) AS item
+  JOIN `xiaoyj-lab.module1_unstructureddata.warranty_generic_sections_extracted` warr ON item.item_id = warr.product_id
+  WHERE tx.customer_id = 'CUST_00386'
+    AND tx.store_id = 'STORE_009'
+    AND tx.payment_method = 'GIFT_CARD'
+  ORDER BY tx.business_date DESC
+  LIMIT 1;
+  ```
+* **Execution Metric:** Returned **1 row in 2.10s**.
+* **Agent Response:**  
+  > *"Yes, the item purchased by customer **CUST_00386** is **COVERED** under warranty. Based on the historical transaction records and warranty policies, the customer purchased a **Samsung Galaxy M04** on **February 21, 2026**, which has a **24-month** warranty duration. Only **7 months** have elapsed, so the warranty is still active."*
+
+---
+
+##### **Test Case 4: UC 2.3 Step 1 Top Promo Abuse Offender Ranking in GCP**
+* **Prompt:**  
+  `Show cashiers with active cashier promo abuse alerts in the last 7 days and rank the top offending cashiers.`
+* **Generated GoogleSQL:**
+  ```sql
+  SELECT store_id,
+         cashier_id,
+         COUNT(alert_id) AS alert_count,
+         ROUND(AVG(risk_score), 4) AS avg_risk_score,
+         MAX(risk_score) AS max_risk_score,
+         MAX(alert_ts) AS latest_alert_ts
+  FROM `xiaoyj-lab.cymbal_gold.pos_anomaly_alerts`
+  WHERE alert_type = 'cashier_promo_abuse'
+    AND alert_ts >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+  GROUP BY store_id,
+           cashier_id
+  ORDER BY alert_count DESC,
+           avg_risk_score DESC
+  LIMIT 20;
+  ```
+* **Execution Metric:** Returned **10 rows in 1.14s**.
+* **Agent Response:**  
+  > *"Based on the active cashier promo abuse alert analysis over the last 7 days, Cashier `CASH_1190` at `STORE_048` is the top offender with 37 alerts, closely followed by `CASH_1164` at `STORE_041` with 35 alerts."*
+
+---
+
+##### **Test Case 5: UC 2.3 Step 2 Cross-Cloud AWS S3 Checkout Audit via BigLake Federation**
+* **Prompt:**  
+  `Retrieve historical checkout transaction logs for top promo abuse offender Cashier CASH_1164.`
+* **Generated GoogleSQL:**
+  ```sql
+  SELECT transaction_id,
+         event_timestamp,
+         store_id,
+         pos_terminal_id,
+         cashier_id,
+         payment_method,
+         total_amount_usd
+  FROM `xiaoyj-lab.cymbal-lakehouse.elevate_data.silver_pos_transactions`
+  WHERE cashier_id = 'CASH_1164'
+  ORDER BY event_timestamp ASC
+  LIMIT 10;
+  ```
+* **Execution Metric:** Returned **10 rows in 5.38s** from federated AWS S3 Iceberg data layer (`s3://cymbal-global-retail-demo/lakehouse/elevate_data/silver_pos_transactions`).
+* **Agent Response:**  
+  > *"The historical checkout transaction logs for cashier **CASH_1164** (identified as a top promo abuse offender) have been retrieved from the federated S3 data layer, adapted from the standard transaction log query."*
+

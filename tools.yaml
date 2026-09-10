@@ -1,0 +1,29 @@
+kind: source
+name: operations-db
+type: bigtable
+project: xiaoyj-lab
+instance: operations-db
+---
+kind: tool
+name: list_tables
+type: bigtable-list-tables
+source: operations-db
+description: List all tables in Bigtable instance operations-db.
+---
+kind: tool
+name: list_schemas
+type: bigtable-list-schemas
+source: operations-db
+description: List schemas for tables in Bigtable instance operations-db.
+---
+kind: tool
+name: query_cashier_realtime_alerts
+type: bigtable-sql
+source: operations-db
+description: Query real-time cashier metrics and audit status flags for a cashier by row key prefix from cashier_realtime_alerts.
+statement: |
+  SELECT CAST(_key AS STRING) as row_key, stats, flags FROM cashier_realtime_alerts WHERE CAST(_key AS STRING) LIKE @row_key_prefix ORDER BY _key ASC LIMIT 5;
+parameters:
+  - name: row_key_prefix
+    type: string
+    description: Row key prefix for the cashier, e.g. STORE_048#CASH_1190%
