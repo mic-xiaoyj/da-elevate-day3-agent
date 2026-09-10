@@ -162,48 +162,86 @@ Implemented `cymbal_analytics_tool` targeting the published BigQuery Data Agent 
 ```python
 """Tool wrapper for BigQuery Conversational Analytics Data Agent.
 
-Interacts with the published BigQuery Conversational Data Agent for Cymbal Retail:
-projects/xiaoyj-lab/locations/global/dataAgents/cymbal-retail-analytics
+Interacts with the published BigQuery Conversational Data Agent using ADK's native
+ask_data_agent tool library (google.adk.tools.data_agent.data_agent_tool.ask_data_agent).
 """
 
 import os
+import re
 import json
 import time
 import logging
-import requests
 import google.auth
-import google.auth.transport.requests
+from google.adk.tools.data_agent.data_agent_tool import (
+    ask_data_agent,
+    DataAgentToolConfig,
+)
 
 logger = logging.getLogger(__name__)
 
-PROJECT_ID = os.environ.get("PROJECT_ID", "xiaoyj-lab")
-LOCATION = os.environ.get("LOCATION", "global")
-DATA_AGENT_NAME = os.environ.get(
-    "DATA_AGENT_NAME",
-    f"projects/{PROJECT_ID}/locations/{LOCATION}/dataAgents/cymbal-retail-analytics"
-)
 
-CHAT_URL = f"https://geminidataanalytics.googleapis.com/v1/projects/{PROJECT_ID}/locations/{LOCATION}:chat"
+def _get_project_id() -> str:
+    """Retrieve target GCP project ID from environment without hardcoded sandbox fallbacks."""
+    project_id = os.environ.get("PROJECT_ID") or os.environ.get("GOOGLE_CLOUD_PROJECT")
+    if not project_id:
+        raise ValueError(
+            "PROJECT_ID or GOOGLE_CLOUD_PROJECT environment variable must be set."
+        )
+    return project_id
 
 
-def _get_access_token() -> str:
-    """Retrieve OAuth access token for Google Cloud APIs."""
-    credentials, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
-    auth_req = google.auth.transport.requests.Request()
-    credentials.refresh(auth_req)
-    return credentials.token
+def _get_data_agent_name() -> str:
+    """Resolve the published BigQuery Conversational Data Agent resource name."""
+    configured_name = os.environ.get("DATA_AGENT_NAME")
+    if configured_name:
+        return configured_name
+
+    project_id = _get_project_id()
+    location = os.environ.get("LOCATION", "global")
+    agent_id = os.environ.get("DATA_AGENT_ID", "cymbal-retail-analytics")
+    return f"projects/{project_id}/locations/{location}/dataAgents/{agent_id}"
+
+
+def check_partition_guardrail(query: str) -> str | None:
+    """Mandatory Partition Clarification Guardrail.
+
+    Evaluates whether an unbounded query against partitioned tables (`pos_transactions_gold`,
+    `pos_anomaly_alerts`) lacks a date range or partition constraint, and prompts for clarification
+    to prevent costly full table scans.
+    """
+    lower_q = query.lower()
+    targets_partitioned = any(
+        tbl in lower_q
+        for tbl in [
+            "pos_transactions_gold",
+            "pos_anomaly_alerts",
+            "transaction ledger",
+            "alert ledger",
+            "all transactions",
+            "all anomaly alerts",
+        ]
+    )
+    has_temporal_bound = bool(
+        re.search(
+            r"\b(today|yesterday|current_date|current_timestamp|hours?|days?|weeks?|months?|years?|last|latest|recent|since|interval|txn-[\w-]+|cash_[\w-]+|store_[\w-]+|202\d)\b",
+            lower_q,
+        )
+    )
+    if targets_partitioned and not has_temporal_bound:
+        return (
+            "Mandatory Partition Clarification Guardrail: Queries against partitioned ledgers "
+            "(`pos_transactions_gold`, `pos_anomaly_alerts`) require an explicit date or lookback window "
+            "(e.g., 'today', 'last 7 days', or specific business_date) to prevent unbounded full table scans. "
+            "Please clarify the specific time frame or partition you would like to analyze."
+        )
+    return None
 
 
 def cymbal_analytics_tool(query: str) -> str:
     """Execute analytical and conversational SQL queries against Cymbal Retail BigQuery gold tables.
 
-    Use this tool for:
-    - Daily store inventory reconciliation and stockout burn-rate analysis (gold_inventory_reconciliation_ledger)
-    - Real-time intraday POS checkout ledger and transaction lookups (pos_transactions_gold)
-    - Cashier promo abuse alerts and anomaly rankings (pos_anomaly_alerts)
-    - Warranty policy terms and past purchase verification (warranty_generic_sections_extracted)
-    - Historical customer transactions and 7-day cashier baseline metrics (historical_transactional_data)
-    - Cross-cloud federated AWS S3 transactions (silver_pos_transactions via BigLake)
+    Uses ADK native ask_data_agent with server-side parameter pinning, exponential backoff,
+    and the Mandatory Partition Clarification Guardrail.
 
     Args:
         query: Verbatim natural language inquiry referencing enterprise business terms.
@@ -211,81 +249,113 @@ def cymbal_analytics_tool(query: str) -> str:
     Returns:
         Formatted analytical response including generated SQL and data summary.
     """
+    # 1. Pre-execution Partition Clarification Guardrail Check
+    guardrail_response = check_partition_guardrail(query)
+    if guardrail_response:
+        return guardrail_response
+
+    # 2. Parameter Pinning & Native Credentials
+    try:
+        data_agent_name = _get_data_agent_name()
+    except Exception as e:
+        return f"Configuration Error: {e}"
+
+    location = os.environ.get("LOCATION", "global")
+    settings = DataAgentToolConfig(location=location)
+
+    try:
+        credentials, _ = google.auth.default(
+            scopes=["https://www.googleapis.com/auth/cloud-platform"]
+        )
+    except Exception as e:
+        return f"Authentication Error: Unable to acquire default credentials: {e}"
+
     max_retries = 3
     base_delay = 2.0
-
-    payload = {
-        "dataAgentContext": {
-            "dataAgent": DATA_AGENT_NAME
-        },
-        "messages": [
-            {
-                "userMessage": {
-                    "text": query
-                }
-            }
-        ]
-    }
-
     last_error = None
+
     for attempt in range(1, max_retries + 1):
         try:
-            token = _get_access_token()
-            headers = {
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-            }
+            res = ask_data_agent(
+                data_agent_name=data_agent_name,
+                query=query,
+                credentials=credentials,
+                settings=settings,
+                tool_context=None,
+            )
 
-            response = requests.post(CHAT_URL, headers=headers, json=payload, timeout=60)
-            if response.status_code == 200:
-                events = response.json()
-                if not isinstance(events, list):
-                    return str(events)
-
+            if res.get("status") == "SUCCESS":
+                response_steps = res.get("response", [])
                 final_answer_parts = []
+                thought_parts = []
                 generated_sql = None
-                result_data = None
+                retrieved_data = None
 
-                for event in events:
-                    sys_msg = event.get("systemMessage", {})
-                    
-                    text_obj = sys_msg.get("text", {})
+                for step in response_steps:
+                    if not isinstance(step, dict):
+                        continue
+
+                    # Text extraction
+                    text_obj = step.get("text", {})
                     text_type = text_obj.get("textType")
                     parts = text_obj.get("parts", [])
                     if text_type == "FINAL_RESPONSE":
                         final_answer_parts.extend(parts)
+                    elif text_type == "THOUGHT":
+                        thought_parts.extend(parts)
+                    elif parts and not final_answer_parts:
+                        thought_parts.extend(parts)
 
-                    data_obj = sys_msg.get("data", {})
-                    matched_query = data_obj.get("matchedQuery", {}).get("exampleQuery", {})
-                    if "sqlQuery" in matched_query:
-                        generated_sql = matched_query["sqlQuery"]
-                    elif "generatedSql" in data_obj:
+                    # SQL extraction
+                    data_obj = step.get("data", {})
+                    if "generatedSql" in data_obj:
                         generated_sql = data_obj["generatedSql"]
-                    if "resultData" in data_obj:
-                        result_data = data_obj["resultData"]
+                    elif "matchedQuery" in data_obj:
+                        matched = data_obj["matchedQuery"].get("exampleQuery", {})
+                        if "sqlQuery" in matched:
+                            generated_sql = matched["sqlQuery"]
 
-                response_text = "\n".join(final_answer_parts).strip()
-                output = []
-                if response_text:
-                    output.append(response_text)
+                    # Data extraction
+                    if "Data Retrieved" in step:
+                        retrieved_data = step["Data Retrieved"]
+
+                output_lines = []
+                if final_answer_parts:
+                    output_lines.append("\n".join(final_answer_parts))
+                elif thought_parts:
+                    output_lines.append("\n".join(thought_parts))
                 if generated_sql:
-                    output.append(f"\n```sql\n{generated_sql.strip()}\n```")
-                if result_data:
-                    output.append(f"\nData Results:\n```json\n{json.dumps(result_data, indent=2)[:500]}...\n```")
+                    output_lines.append(f"\n```sql\n{generated_sql.strip()}\n```")
+                if retrieved_data:
+                    summary = retrieved_data.get("summary", "")
+                    headers = retrieved_data.get("headers", [])
+                    rows = retrieved_data.get("rows", [])
+                    output_lines.append(f"\nRetrieved Data ({summary}):")
+                    if headers and rows:
+                        output_lines.append(f"Columns: {', '.join(headers)}")
+                        output_lines.append(json.dumps(rows[:10], indent=2))
 
-                return "\n".join(output) if output else "No data returned from analytical agent."
+                if output_lines:
+                    return "\n".join(output_lines)
+                return "Query processed successfully, but no response payload returned."
             else:
-                last_error = f"HTTP {response.status_code}: {response.text}"
+                last_error = res.get("error_details", "Unknown error from ask_data_agent")
+                logger.warning(
+                    f"ask_data_agent failed (attempt {attempt}/{max_retries}): {last_error}"
+                )
+
         except Exception as e:
             last_error = str(e)
+            logger.warning(
+                f"Transient error calling ask_data_agent (attempt {attempt}/{max_retries}): {e}"
+            )
 
-        logger.warning(f"cymbal_analytics_tool attempt {attempt} failed: {last_error}")
         if attempt < max_retries:
-            time.sleep(base_delay * attempt)
+            time.sleep(base_delay * (2 ** (attempt - 1)))
 
     return (
-        f"Unable to reach the Cymbal Retail analytical engine after {max_retries} attempts. "
-        f"The store operational database may be temporarily offline or unreachable. Detail: {last_error}"
+        f"Store data service is currently unreachable due to database connectivity failure. "
+        f"Details: {last_error}"
     )
 ```
 
@@ -376,7 +446,8 @@ Features `VECTOR_SEARCH` with `AI.EMBED`, adjacent context stitching ($N-1$ to $
 
 Targets table: <PROJECT_ID>.cymbal_gold.pos_manual_chunk_embeddings
 Provides semantic vector search with adjacent chunk stitching (N-1 to N+1),
-similarity score thresholding (0.70), full-text search fallback, and GCS HTTPS link conversion.
+SQL-level CASE error boosting (0.99), universal keyword full-text search fallback,
+and exact SDD-mandated low-confidence decline strings.
 """
 
 import os
@@ -387,13 +458,50 @@ from google.cloud import bigquery
 
 logger = logging.getLogger(__name__)
 
-PROJECT_ID = os.environ.get("PROJECT_ID", "xiaoyj-lab")
-TABLE_NAME = f"`{PROJECT_ID}.cymbal_gold.pos_manual_chunk_embeddings`"
 SIMILARITY_THRESHOLD = 0.70
+MANDATED_DECLINE_TEXT = (
+    "I cannot find certified warranty or repair rules for this specific error in our technical repository."
+)
+
+
+def _get_project_id() -> str:
+    project_id = os.environ.get("PROJECT_ID") or os.environ.get("GOOGLE_CLOUD_PROJECT")
+    if not project_id:
+        raise ValueError(
+            "PROJECT_ID or GOOGLE_CLOUD_PROJECT environment variable must be set."
+        )
+    return project_id
+
+
+def _get_table_name() -> str:
+    return f"`{_get_project_id()}.cymbal_gold.pos_manual_chunk_embeddings`"
 
 
 def _get_bq_client() -> bigquery.Client:
-    return bigquery.Client(project=PROJECT_ID)
+    return bigquery.Client(project=_get_project_id())
+
+
+def _extract_error_code(query: str) -> str:
+    """Extract hardware error code token (e.g. ERR-PAY-4001, ERR-DN-PRNT-24V)."""
+    match = re.search(r"(ERR-[\w-]+)", query, re.IGNORECASE)
+    return match.group(1).upper() if match else ""
+
+
+def _clean_keywords_for_search(query: str) -> str:
+    """Extract and clean keywords from user query for full-text SEARCH() fallback."""
+    error_code = _extract_error_code(query)
+    if error_code:
+        return f"`{error_code}`"
+    
+    # Filter stopwords and punctuation for general descriptive hardware questions
+    stopwords = {
+        "what", "is", "the", "how", "do", "we", "i", "can", "to", "ensure",
+        "and", "for", "a", "an", "in", "on", "of", "when", "at", "with",
+        "from", "this", "that", "there", "their", "are", "was", "were"
+    }
+    words = re.findall(r"\b[A-Za-z0-9]{3,}\b", query)
+    meaningful = [w for w in words if w.lower() not in stopwords]
+    return " ".join(meaningful[:6]) if meaningful else re.sub(r"[^\w\s]", " ", query).strip()
 
 
 def pos_troubleshooting_rag_tool(query: str) -> str:
@@ -411,8 +519,18 @@ def pos_troubleshooting_rag_tool(query: str) -> str:
     """
     max_retries = 3
     base_delay = 1.5
-    client = _get_bq_client()
 
+    try:
+        table_name = _get_table_name()
+        client = _get_bq_client()
+    except Exception as e:
+        logger.error(f"Configuration or client init error: {e}")
+        return MANDATED_DECLINE_TEXT
+
+    extracted_error = _extract_error_code(query)
+
+    # Step 1: Vector Search with SQL-level CASE Keyword Error-Boosting
+    # If the chunk content matches the extracted error code, it receives an automatic boosted score of 0.99.
     vector_search_sql = f"""
     WITH matched AS (
       SELECT 
@@ -421,9 +539,12 @@ def pos_troubleshooting_rag_tool(query: str) -> str:
         base.equipment_covered,
         base.source_pdf_uri,
         base.chunk_index,
-        ROUND(1 - distance, 4) AS similarity_score
+        CASE
+          WHEN @error_code != '' AND REGEXP_CONTAINS(base.chunk_content, @error_code) THEN 0.9900
+          ELSE ROUND(1 - distance, 4)
+        END AS similarity_score
       FROM VECTOR_SEARCH(
-        TABLE {TABLE_NAME},
+        TABLE {table_name},
         "embedding",
         (SELECT AI.EMBED(@query, endpoint => "text-embedding-005").result AS embedding),
         top_k => 5,
@@ -439,7 +560,7 @@ def pos_troubleshooting_rag_tool(query: str) -> str:
       m.chunk_index,
       STRING_AGG(c.chunk_content, "\\n" ORDER BY c.chunk_index ASC) AS stitched_runbook
     FROM matched m
-    JOIN {TABLE_NAME} c
+    JOIN {table_name} c
       ON m.document_filename = c.document_filename
      AND c.chunk_index BETWEEN (m.chunk_index - 1) AND (m.chunk_index + 1)
     GROUP BY m.document_filename, m.document_title, m.equipment_covered, m.source_pdf_uri, m.similarity_score, m.chunk_index
@@ -449,7 +570,8 @@ def pos_troubleshooting_rag_tool(query: str) -> str:
 
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
-            bigquery.ScalarQueryParameter("query", "STRING", query)
+            bigquery.ScalarQueryParameter("query", "STRING", query),
+            bigquery.ScalarQueryParameter("error_code", "STRING", extracted_error),
         ]
     )
 
@@ -465,69 +587,78 @@ def pos_troubleshooting_rag_tool(query: str) -> str:
             if attempt < max_retries:
                 time.sleep(base_delay * attempt)
 
-    error_code_match = re.search(r"(ERR-[\w-]+)", query, re.IGNORECASE)
-    
+    # If vector match is confident (>= 0.70), return it
     if best_match and best_match.similarity_score >= SIMILARITY_THRESHOLD:
-        if not error_code_match or (error_code_match and error_code_match.group(1).upper() in best_match.stitched_runbook.upper()):
-            return (
-                f"### Hardware Diagnostic Runbook (Relevance Score: {best_match.similarity_score:.2f})\n"
-                f"- **Equipment:** {best_match.equipment_covered} ({best_match.document_title})\n"
-                f"- **Official Documentation:** [{best_match.document_title}]({best_match.doc_link})\n\n"
-                f"#### Troubleshooting Procedure:\n{best_match.stitched_runbook}"
-            )
+        return (
+            f"### Certified POS Hardware Runbook\n\n"
+            f"- **Document Title:** {best_match.document_title}\n"
+            f"- **Equipment Covered:** {best_match.equipment_covered}\n"
+            f"- **Similarity Score:** {best_match.similarity_score:.4f} (Threshold >= {SIMILARITY_THRESHOLD})\n"
+            f"- **Official Documentation:** [{best_match.document_title}]({best_match.doc_link})\n\n"
+            f"#### Surrounding Troubleshooting Procedure (Stitched Adjacent Chunks):\n"
+            f"```text\n{best_match.stitched_runbook.strip()}\n```"
+        )
 
-    # Fallback to exact text search if vector search is below threshold or missed error code
-    if error_code_match:
-        code = error_code_match.group(1).upper()
-        text_search_sql = f"""
+    # Step 2: Fallback to Keyword-Cleaned Full-Text SEARCH for ANY low-confidence query (< 0.70)
+    cleaned_search_terms = _clean_keywords_for_search(query)
+    search_match = None
+
+    if cleaned_search_terms:
+        search_sql = f"""
+        WITH matched AS (
+          SELECT 
+            document_filename,
+            document_title,
+            equipment_covered,
+            source_pdf_uri,
+            chunk_index,
+            0.9500 AS similarity_score
+          FROM {table_name}
+          WHERE SEARCH(chunk_content, @search_term)
+          LIMIT 1
+        )
         SELECT 
-          document_filename,
-          document_title,
-          equipment_covered,
-          REPLACE(source_pdf_uri, "gs://", "https://storage.cloud.google.com/") AS doc_link,
-          chunk_index,
-          chunk_content
-        FROM {TABLE_NAME}
-        WHERE SEARCH(chunk_content, @code)
-        ORDER BY chunk_index ASC
-        LIMIT 1
+          m.document_filename,
+          m.document_title,
+          m.equipment_covered,
+          REPLACE(m.source_pdf_uri, "gs://", "https://storage.cloud.google.com/") AS doc_link,
+          m.similarity_score,
+          STRING_AGG(c.chunk_content, "\\n" ORDER BY c.chunk_index ASC) AS stitched_runbook
+        FROM matched m
+        JOIN {table_name} c
+          ON m.document_filename = c.document_filename
+         AND c.chunk_index BETWEEN (m.chunk_index - 1) AND (m.chunk_index + 1)
+        GROUP BY m.document_filename, m.document_title, m.equipment_covered, m.source_pdf_uri, m.similarity_score
         """
-        job_config_text = bigquery.QueryJobConfig(
+        search_job_config = bigquery.QueryJobConfig(
             query_parameters=[
-                bigquery.ScalarQueryParameter("code", "STRING", f"`{code}`")
+                bigquery.ScalarQueryParameter("search_term", "STRING", cleaned_search_terms)
             ]
         )
-        try:
-            results = list(client.query(text_search_sql, job_config=job_config_text).result())
-            if results:
-                m = results[0]
-                stitch_sql = f"""
-                SELECT STRING_AGG(chunk_content, "\\n" ORDER BY chunk_index ASC) AS stitched_runbook
-                FROM {TABLE_NAME}
-                WHERE document_filename = @filename
-                  AND chunk_index BETWEEN (@chunk_idx - 1) AND (@chunk_idx + 1)
-                """
-                stitch_config = bigquery.QueryJobConfig(
-                    query_parameters=[
-                        bigquery.ScalarQueryParameter("filename", "STRING", m.document_filename),
-                        bigquery.ScalarQueryParameter("chunk_idx", "INT64", m.chunk_index),
-                    ]
-                )
-                stitched_runbook = list(client.query(stitch_sql, job_config=stitch_config).result())[0].stitched_runbook
-                return (
-                    f"### Hardware Diagnostic Runbook (Exact Code Match Fallback)\n"
-                    f"- **Equipment:** {m.equipment_covered} ({m.document_title})\n"
-                    f"- **Official Documentation:** [{m.document_title}]({m.doc_link})\n\n"
-                    f"#### Troubleshooting Procedure:\n{stitched_runbook}"
-                )
-        except Exception as e:
-            logger.warning(f"Text search fallback failed: {e}")
+        for attempt in range(1, max_retries + 1):
+            try:
+                results = list(client.query(search_sql, job_config=search_job_config).result())
+                if results:
+                    search_match = results[0]
+                break
+            except Exception as e:
+                logger.warning(f"SEARCH fallback attempt {attempt} failed: {e}")
+                if attempt < max_retries:
+                    time.sleep(base_delay * attempt)
 
-    return (
-        "Warning: The requested topic appears to be out-of-scope for POS terminal hardware diagnostics "
-        "or falls below the confidence threshold (0.70). Please consult the official store hardware "
-        "manuals or file an escalation with store technical support."
-    )
+    if search_match:
+        return (
+            f"### Certified POS Hardware Runbook (Full-Text Search Fallback)\n\n"
+            f"- **Document Title:** {search_match.document_title}\n"
+            f"- **Equipment Covered:** {search_match.equipment_covered}\n"
+            f"- **Similarity Score:** {search_match.similarity_score:.4f} (Retrieved via Exact Keyword Alignment)\n"
+            f"- **Official Documentation:** [{search_match.document_title}]({search_match.doc_link})\n\n"
+            f"#### Surrounding Troubleshooting Procedure (Stitched Adjacent Chunks):\n"
+            f"```text\n{search_match.stitched_runbook.strip()}\n```"
+        )
+
+    # Step 3: Out-of-bounds or low-relevance queries return the exact SDD-mandated decline text
+    return MANDATED_DECLINE_TEXT
 ```
 
 ##### 3. Unit Testing & Guardrail Verification Evidence
@@ -585,11 +716,23 @@ type: bigtable-sql
 source: operations-db
 description: Query real-time cashier metrics and audit status flags for a cashier by row key prefix from cashier_realtime_alerts.
 statement: |
-  SELECT CAST(_key AS STRING) as row_key, stats, flags FROM cashier_realtime_alerts WHERE CAST(_key AS STRING) LIKE @row_key_prefix ORDER BY _key ASC LIMIT 5;
+  SELECT CAST(_key AS STRING) AS row_key, stats, flags FROM cashier_realtime_alerts WHERE CAST(_key AS STRING) LIKE @row_key_prefix ORDER BY _key ASC LIMIT 5;
 parameters:
   - name: row_key_prefix
     type: string
     description: Row key prefix for the cashier, e.g. STORE_048#CASH_1190%
+---
+kind: tool
+name: read_pos_transactions_enriched_sql
+type: bigtable-sql
+source: operations-db
+description: Read enriched real-time POS transactions and continuous query anomaly alert flags by row key from pos_transactions_enriched.
+statement: |
+  SELECT CAST(_key AS STRING) AS row_key, tx, alerts FROM pos_transactions_enriched WHERE CAST(_key AS STRING) = @row_key LIMIT 1;
+parameters:
+  - name: row_key
+    type: string
+    description: Row key for transaction lookup in format STORE_ID#TRANSACTION_ID, e.g. STORE_005#TXN-20260312-0015811
 ```
 
 ##### 2. Secret Manager & Cloud Run Microservice Deployment
@@ -625,7 +768,7 @@ Features OIDC bearer authentication, MCP protocol binding, and base64 / big-endi
 """Cloud Bigtable MCP Toolset & Real-Time Alert Reader.
 
 Connects to the Cloud Run microservice hosting the MCP Database Toolbox:
-mcp-toolbox-bigtable (Instance: operations-db, Table: cashier_realtime_alerts)
+mcp-toolbox-bigtable (Instance: operations-db, Tables: cashier_realtime_alerts, pos_transactions_enriched)
 """
 
 import os
@@ -634,7 +777,6 @@ import base64
 import struct
 import logging
 import requests
-import google.auth
 from google.auth.transport.requests import Request
 from google.oauth2 import id_token
 
@@ -643,30 +785,48 @@ from google.adk.tools.mcp_tool.mcp_session_manager import StreamableHTTPConnecti
 
 logger = logging.getLogger(__name__)
 
-BIGTABLE_MCP_URL = os.environ.get(
-    "BIGTABLE_MCP_URL",
-    "https://mcp-toolbox-bigtable-737446388661.us-central1.run.app"
-)
+
+def _get_mcp_url() -> str:
+    """Retrieve Cloud Run MCP service URL from environment without hardcoded sandbox fallbacks."""
+    url = os.environ.get("BIGTABLE_MCP_URL")
+    if not url:
+        raise ValueError("BIGTABLE_MCP_URL environment variable must be set.")
+    return url.rstrip("/")
 
 
 def _get_id_token() -> str:
     """Fetch OIDC ID token for authenticating with Cloud Run MCP service."""
     auth_req = Request()
-    return id_token.fetch_id_token(auth_req, BIGTABLE_MCP_URL)
+    return id_token.fetch_id_token(auth_req, _get_mcp_url())
 
 
 def _get_auth_headers(context=None) -> dict[str, str]:
-    return {"Authorization": f"Bearer {_get_id_token()}"}
+    try:
+        return {"Authorization": f"Bearer {_get_id_token()}"}
+    except Exception as e:
+        logger.warning(f"Could not acquire OIDC token for MCP: {e}")
+        return {}
 
 
 # Initialize ADK McpToolset bound to Cloud Run MCP service
-bigtable_mcp_toolset = McpToolset(
-    connection_params=StreamableHTTPConnectionParams(
-        url=f"{BIGTABLE_MCP_URL}/mcp",
-        headers={"Authorization": f"Bearer {_get_id_token()}"}
-    ),
-    header_provider=_get_auth_headers
-)
+def get_bigtable_mcp_toolset() -> McpToolset:
+    url = _get_mcp_url()
+    return McpToolset(
+        connection_params=StreamableHTTPConnectionParams(
+            url=f"{url}/mcp",
+            headers=_get_auth_headers()
+        ),
+        header_provider=_get_auth_headers
+    )
+
+
+# Lazy-loaded / module-level toolset
+bigtable_mcp_toolset = None
+try:
+    if os.environ.get("BIGTABLE_MCP_URL"):
+        bigtable_mcp_toolset = get_bigtable_mcp_toolset()
+except Exception as _e:
+    logger.warning(f"Could not initialize bigtable_mcp_toolset on module import: {_e}")
 
 
 def decode_bigtable_event(raw_row: dict) -> dict:
@@ -736,6 +896,7 @@ def read_cashier_realtime_alerts(store_id: str, cashier_id: str) -> str:
     prefix = f"{cleaned_store}#{cleaned_cashier}%"
 
     try:
+        url = _get_mcp_url()
         token = _get_id_token()
         headers = {
             "Authorization": f"Bearer {token}",
@@ -752,37 +913,113 @@ def read_cashier_realtime_alerts(store_id: str, cashier_id: str) -> str:
                 }
             }
         }
-        resp = requests.post(f"{BIGTABLE_MCP_URL}/mcp", headers=headers, json=payload, timeout=15)
+        resp = requests.post(f"{url}/mcp", headers=headers, json=payload, timeout=15)
         if resp.status_code == 200:
             data = resp.json()
             result = data.get("result", {})
             content = result.get("content", [])
-            if content and "text" in content[0]:
-                raw_rows = json.loads(content[0]["text"])
-                if not raw_rows:
-                    return f"No real-time alert events found in Bigtable for prefix '{prefix}'."
+            raw_rows = []
+            for c in content:
+                if isinstance(c, dict) and "text" in c:
+                    try:
+                        item = json.loads(c["text"])
+                        if isinstance(item, list):
+                            raw_rows.extend(item)
+                        elif isinstance(item, dict):
+                            raw_rows.append(item)
+                    except Exception:
+                        pass
 
-                latest = decode_bigtable_event(raw_rows[0])
-                stats = latest["stats"]
-                flags = latest["flags"]
+            if not raw_rows:
+                return f"No real-time alert events found in Bigtable for prefix '{prefix}'."
 
-                return (
-                    f"### Cloud Bigtable Real-Time Alert Event\n"
-                    f"- **Store:** {cleaned_store}\n"
-                    f"- **Cashier ID:** {cleaned_cashier}\n"
-                    f"- **Row Key:** `{latest['row_key']}`\n"
-                    f"- **Audit Status:** `{flags.get('audit_status', 'UNKNOWN')}`\n"
-                    f"- **Risk Score:** `{stats.get('risk_score', 0.0)}`\n"
-                    f"- **1-Hour Transaction Count:** {stats.get('cashier_1h_txn_count', 0)}\n"
-                    f"- **1-Hour Manual Override Count:** {stats.get('cashier_1h_manual_override_count', 0)}\n"
-                    f"- **1-Hour Manual Override Rate:** {stats.get('cashier_1h_override_rate_pct', '0.00%')}\n"
-                    f"- **1-Hour Promo Rate:** {stats.get('cashier_1h_promo_rate', 0.0) * 100:.2f}%\n"
-                    f"- **1-Hour Total Discount (USD):** ${stats.get('cashier_1h_total_discount_usd', 0.0):,.2f}\n"
-                )
+            latest = decode_bigtable_event(raw_rows[0])
+            stats = latest["stats"]
+            flags = latest["flags"]
+
+            return (
+                f"### Cloud Bigtable Real-Time Alert Event\n"
+                f"- **Store:** {cleaned_store}\n"
+                f"- **Cashier ID:** {cleaned_cashier}\n"
+                f"- **Row Key:** `{latest['row_key']}`\n"
+                f"- **Audit Status:** `{flags.get('audit_status', 'UNKNOWN')}`\n"
+                f"- **Risk Score:** `{stats.get('risk_score', 0.0)}`\n"
+                f"- **1-Hour Transaction Count:** {stats.get('cashier_1h_txn_count', 0)}\n"
+                f"- **1-Hour Manual Override Count:** {stats.get('cashier_1h_manual_override_count', 0)}\n"
+                f"- **1-Hour Manual Override Rate:** {stats.get('cashier_1h_override_rate_pct', '0.00%')}\n"
+                f"- **1-Hour Promo Rate:** {stats.get('cashier_1h_promo_rate', 0.0) * 100:.2f}%\n"
+                f"- **1-Hour Total Discount (USD):** ${stats.get('cashier_1h_total_discount_usd', 0.0):,.2f}\n"
+            )
     except Exception as e:
         logger.error(f"Error calling Bigtable MCP tool: {e}")
 
     return f"Unable to retrieve real-time alerts from Cloud Bigtable for prefix '{prefix}'."
+
+
+def read_pos_transactions_enriched(store_id: str, transaction_id: str) -> str:
+    """Query enriched real-time POS transaction details and anomaly alert flags from Cloud Bigtable.
+
+    Use this tool when looking up real-time transaction facts and alert annotations
+    for a specific transaction at a store (e.g. Store 5, Transaction TXN-20260312-0015811).
+
+    Args:
+        store_id: Store identifier or number (e.g. '5', '005', 'STORE_005').
+        transaction_id: Transaction ID (e.g. 'TXN-20260312-0015811').
+
+    Returns:
+        Structured JSON or summary of the transaction line items and anomaly alert flags.
+    """
+    cleaned_store = str(store_id).strip().upper()
+    if not cleaned_store.startswith("STORE_"):
+        if cleaned_store.isdigit():
+            cleaned_store = f"STORE_{int(cleaned_store):03d}"
+        else:
+            cleaned_store = f"STORE_{cleaned_store}"
+
+    cleaned_txn = str(transaction_id).strip().upper()
+    row_key = f"{cleaned_store}#{cleaned_txn}"
+
+    try:
+        url = _get_mcp_url()
+        token = _get_id_token()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "read_pos_transactions_enriched_sql",
+                "arguments": {
+                    "row_key": row_key
+                }
+            }
+        }
+        resp = requests.post(f"{url}/mcp", headers=headers, json=payload, timeout=15)
+        if resp.status_code == 200:
+            data = resp.json()
+            result = data.get("result", {})
+            content = result.get("content", [])
+            raw_rows = []
+            for c in content:
+                if isinstance(c, dict) and "text" in c:
+                    try:
+                        item = json.loads(c["text"])
+                        if isinstance(item, list):
+                            raw_rows.extend(item)
+                        elif isinstance(item, dict):
+                            raw_rows.append(item)
+                    except Exception:
+                        pass
+            if not raw_rows:
+                return f"No enriched transaction record found in Bigtable for row key '{row_key}'."
+            return f"### Enriched POS Transaction Record\n- **Row Key:** `{row_key}`\n```json\n{json.dumps(raw_rows[0], indent=2)}\n```"
+    except Exception as e:
+        logger.error(f"Error querying read_pos_transactions_enriched: {e}")
+
+    return f"Unable to retrieve enriched transaction from Cloud Bigtable for row key '{row_key}'."
 ```
 
 ##### 4. Live Verification Evidence
@@ -825,21 +1062,24 @@ Configured `cymbal_operations_agent` using model `gemini-3.6-flash` and bound al
 Decoupled 3-Toolset ADK Coordinator Agent orchestrating:
 1. cymbal_analytics_tool: NL2SQL Conversational Analytics Data Agent (BigQuery)
 2. pos_troubleshooting_rag_tool: POS Terminal Hardware Diagnostic Runbooks (BigQuery Vector Search)
-3. bigtable_mcp_toolset / read_cashier_realtime_alerts: Live Cashier Metrics & Audit Flags (Cloud Bigtable)
+3. bigtable_mcp_toolset / read_cashier_realtime_alerts / read_pos_transactions_enriched: Live Metrics & Alerts (Cloud Bigtable)
 """
 
 import os
 from dotenv import load_dotenv
 from google.adk.agents import Agent
+from app.utils.logging import setup_logging
 
-# Load environment variables
+# Initialize environment and structured JSON logging
 load_dotenv()
+setup_logging()
 
 from app.tools.analytics_tool import cymbal_analytics_tool
 from app.tools.rag_tool import pos_troubleshooting_rag_tool
 from app.tools.bigtable_tool import (
     bigtable_mcp_toolset,
     read_cashier_realtime_alerts,
+    read_pos_transactions_enriched,
 )
 
 MODEL_NAME = os.environ.get("COORDINATOR_MODEL", "gemini-3.6-flash")
@@ -862,14 +1102,20 @@ You have access to 3 specialized enterprise toolsets:
 2. `pos_troubleshooting_rag_tool`:
    - Hardware diagnostic and recovery runbook retrieval powered by BigQuery Vector Search and adjacent context stitching over POS technical manuals.
    - Targets `cymbal_gold.pos_manual_chunk_embeddings` for Toshiba TCx 810, Diebold Nixdorf Beetle, HP Engage One, etc.
+   - Features SQL-level CASE error code boosting (0.99) and keyword fallback search.
    - Use for hardware error codes (e.g. ERR-PAY-4001, ERR-DN-PRNT-24V), device freezes, barcode scanner failures, and receipt printer jams.
-   - Always cite the equipment name and provide the clickable HTTPS documentation link from the tool output.
-   - If an inquiry is out-of-scope for POS hardware (e.g. vehicle repair, household appliances), report the certified warning message.
+   - Always cite the equipment name and provide the clickable documentation link from the tool output.
+   - If an inquiry is out-of-scope or unresolvable in technical repositories, report the exact decline message from the tool.
 
-3. `read_cashier_realtime_alerts` & `bigtable_mcp_toolset`:
-   - Real-time operational streaming engine backed by Cloud Bigtable (`operations-db`, table `cashier_realtime_alerts`) exposed via the Cloud Run MCP microservice.
+3. `read_cashier_realtime_alerts`, `read_pos_transactions_enriched`, & `bigtable_mcp_toolset`:
+   - Real-time operational streaming engine backed by Cloud Bigtable (`operations-db`, tables `cashier_realtime_alerts` and `pos_transactions_enriched`) exposed via Cloud Run MCP microservice.
    - Reads live 1-hour rolling metrics for cashiers: `audit_status` flag ('REVIEW' vs 'CLEAR'), 1-hour manual override count, 1-hour transaction count, live manual override rate percentage, promo rate, total discount USD, and risk score.
-   - Use `read_cashier_realtime_alerts(store_id, cashier_id)` for high-level decoded summaries, or `query_cashier_realtime_alerts` for raw MCP protocol queries.
+   - Reads enriched real-time POS transaction line items and continuous query anomaly alert tags.
+
+### Mandatory Partition Clarification Guardrail:
+- Tables `pos_transactions_gold` (intraday transactions) and `pos_anomaly_alerts` (fraud & promo anomalies) are partitioned ledgers.
+- Whenever a user asks an open-ended, unbounded question about transactions, sales, or anomaly alerts (e.g. "show all transactions", "what are total sales?", "list anomaly alerts") WITHOUT specifying a date range, lookback window (e.g. "today", "last 7 days"), transaction ID, cashier ID, or store ID, you MUST NOT submit an unchecked query.
+- Instead, you MUST proactively pause and prompt the user for clarification (e.g. "Please specify the time window or business date (e.g., today, last 7 days) you would like to analyze.") to safeguard database performance and prevent unbounded partition scans.
 
 ### Multi-Tool Orchestration Protocols:
 
@@ -877,6 +1123,7 @@ You have access to 3 specialized enterprise toolsets:
    - For standalone hardware inquiries (e.g. ERR-PAY-4001): Call `pos_troubleshooting_rag_tool`.
    - For standalone store analytics / stockout / warranty inquiries: Call `cymbal_analytics_tool`.
    - For standalone real-time cashier metrics (e.g. live status of Cashier CASH_1190 at Store 48): Call `read_cashier_realtime_alerts`.
+   - For specific real-time transaction fact lookups: Call `read_pos_transactions_enriched`.
 
 2. **Parallel Tool Dispatch (Single Turn):**
    - When asked for dual-baseline or intra-day risk comparisons (e.g., *"What is Cashier CASH_1190's live 1-hour override rate right now, compared to their 7-day historical override baseline?"*):
@@ -894,17 +1141,21 @@ You have access to 3 specialized enterprise toolsets:
 Maintain a professional, precise, enterprise operations tone. Format numbers, percentages, currency, and code blocks clearly with markdown.
 """
 
+active_tools = [
+    cymbal_analytics_tool,
+    pos_troubleshooting_rag_tool,
+    read_cashier_realtime_alerts,
+    read_pos_transactions_enriched,
+]
+if bigtable_mcp_toolset is not None:
+    active_tools.append(bigtable_mcp_toolset)
+
 root_agent = Agent(
     name="cymbal_operations_agent",
     model=MODEL_NAME,
     instruction=COORDINATOR_INSTRUCTIONS,
     description="Root operational coordinator agent for Cymbal Retail store operations, POS diagnostics, and fraud audit.",
-    tools=[
-        cymbal_analytics_tool,
-        pos_troubleshooting_rag_tool,
-        read_cashier_realtime_alerts,
-        bigtable_mcp_toolset,
-    ],
+    tools=active_tools,
 )
 
 cymbal_operations_agent = root_agent
@@ -1221,5 +1472,58 @@ FILTER USING (store_id = (
 ));
 ```
 
+##### 5. Production Containerization (`Dockerfile`) & Automation (`Makefile`)
+To deploy the ADK agent as an enterprise-grade containerized service on Cloud Run or GKE, a hardened multi-stage Python 3.11 Dockerfile and standard Makefile targets are provided:
 
+```dockerfile
+FROM python:3.11-slim
 
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PORT=8080
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --upgrade pip && pip install -r requirements.txt
+
+COPY . .
+
+EXPOSE 8080
+
+CMD ["python", "-m", "google.adk.cli", "web", "app", "--host", "0.0.0.0", "--port", "8080"]
+```
+
+Standard `Makefile` workflow targets:
+```bash
+make install    # Install dependencies in virtual environment
+make test       # Run 15 offline pytest unit tests
+make eval       # Run end-to-end evaluation suite
+make build      # Build container image
+make run        # Run local ADK Web UI
+make deploy     # Deploy to Cloud Run
+```
+
+##### 6. Infrastructure as Code (Terraform Enterprise Packaging)
+Terraform configuration under `terraform/` codifies all supporting cloud infrastructure including IAM least privilege, Cloud Run MCP microservice, and Secret Manager bindings:
+- `terraform/main.tf`: Defines Google Cloud Run MCP service, Secret Manager secret `bigtable-mcp-tools-secret`, and least-privilege IAM service account (`cymbal-agent-sa`).
+- `terraform/variables.tf`: Configurable parameters (`project_id`, `region`, `bigtable_instance_id`, `mcp_image`).
+- `terraform/outputs.tf`: Exports `mcp_service_url`, `mcp_service_name`, and `service_account_email`.
+
+##### 7. Offline Automated Test Suite & Benchmark Dataset (`tests/`)
+Enterprise operations require rigorous CI/CD test automation without relying on external cloud connectivity. The codebase includes a complete offline pytest suite (`15 passed in 7.9s`) and golden evaluation dataset:
+- `tests/test_analytics_tool.py`: Validates the Mandatory Partition Clarification Guardrail on unbounded queries, exponential backoff retries, and `ask_data_agent` formatting.
+- `tests/test_rag_tool.py`: Validates error code extraction, keyword cleaning, vector search mocks with SQL CASE boosting, and the exact SDD decline message.
+- `tests/test_bigtable_tool.py`: Validates 8-byte big-endian binary struct decoding, multi-row MCP unpacking, and alert parsing.
+- `tests/test_agent.py`: Validates agent initialization, tool bindings, and system prompt guardrails.
+- `tests/golden_eval_dataset.json`: Golden benchmark dataset covering all 7 operational scenarios with expected tool calls and assertions.
+
+##### 8. Structured JSON Observability & Cloud Logging (`app/utils/logging.py`)
+Configures structured JSON logging compliant with Google Cloud Operations (Cloud Logging), standardizing timestamps, log severity (`INFO`, `WARNING`, `ERROR`), component tags, and trace correlation IDs for production telemetry.

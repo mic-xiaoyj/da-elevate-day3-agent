@@ -22,8 +22,20 @@ type: bigtable-sql
 source: operations-db
 description: Query real-time cashier metrics and audit status flags for a cashier by row key prefix from cashier_realtime_alerts.
 statement: |
-  SELECT CAST(_key AS STRING) as row_key, stats, flags FROM cashier_realtime_alerts WHERE CAST(_key AS STRING) LIKE @row_key_prefix ORDER BY _key ASC LIMIT 5;
+  SELECT CAST(_key AS STRING) AS row_key, stats, flags FROM cashier_realtime_alerts WHERE CAST(_key AS STRING) LIKE @row_key_prefix ORDER BY _key ASC LIMIT 5;
 parameters:
   - name: row_key_prefix
     type: string
     description: Row key prefix for the cashier, e.g. STORE_048#CASH_1190%
+---
+kind: tool
+name: read_pos_transactions_enriched_sql
+type: bigtable-sql
+source: operations-db
+description: Read enriched real-time POS transactions and continuous query anomaly alert flags by row key from pos_transactions_enriched.
+statement: |
+  SELECT CAST(_key AS STRING) AS row_key, tx, alerts FROM pos_transactions_enriched WHERE CAST(_key AS STRING) = @row_key LIMIT 1;
+parameters:
+  - name: row_key
+    type: string
+    description: Row key for transaction lookup in format STORE_ID#TRANSACTION_ID, e.g. STORE_005#TXN-20260312-0015811

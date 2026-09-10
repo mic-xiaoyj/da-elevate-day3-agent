@@ -1,0 +1,91 @@
+{
+  "dataset_name": "cymbal_operations_agent_golden_eval",
+  "version": "1.0.0",
+  "description": "Golden evaluation dataset for Cymbal Operations Agent multi-tool operational scenarios",
+  "test_cases": [
+    {
+      "id": "UC_1_1a",
+      "category": "Hardware Error Recovery",
+      "prompt": "What is the immediate field recovery protocol when a cashier encounters an ERR-PAY-4001 EMV contactless payment freeze, and how do we ensure the customer is not double-charged?",
+      "dispatch_mode": "SINGLE_TOOL",
+      "expected_tools": ["pos_troubleshooting_rag_tool"],
+      "expected_entities": {
+        "equipment": "Toshiba TCx 810",
+        "error_code": "ERR-PAY-4001",
+        "has_gcs_link": true,
+        "prevention_guideline": "Do not re-swipe or tap card immediately"
+      }
+    },
+    {
+      "id": "UC_1_1c",
+      "category": "Out-of-Scope Hardware",
+      "prompt": "How do I replace the engine oil on a Ford F-150 truck?",
+      "dispatch_mode": "SINGLE_TOOL",
+      "expected_tools": ["pos_troubleshooting_rag_tool"],
+      "expected_entities": {
+        "decline_text": "I cannot find certified warranty or repair rules for this specific error in our technical repository."
+      }
+    },
+    {
+      "id": "UC_1_2a",
+      "category": "Stockout Risk Analysis",
+      "prompt": "What is the estimated cover hours remaining for store inventory positions experiencing stockout risk of less than 20 hours, and what is their total on-hand inventory?",
+      "dispatch_mode": "SINGLE_TOOL",
+      "expected_tools": ["cymbal_analytics_tool"],
+      "expected_entities": {
+        "target_table": "gold_inventory_reconciliation_ledger",
+        "filter_condition": "est_cover_hours_remaining < 20.0",
+        "aggregated_metrics": ["total_on_hand_inventory", "est_cover_hours_remaining"]
+      }
+    },
+    {
+      "id": "UC_1_3",
+      "category": "Real-Time Cashier Metrics",
+      "prompt": "Read live 1-hour rolling metrics and audit status flags for Cashier CASH_1190 at Store 48.",
+      "dispatch_mode": "SINGLE_TOOL",
+      "expected_tools": ["read_cashier_realtime_alerts"],
+      "expected_entities": {
+        "store_id": "STORE_048",
+        "cashier_id": "CASH_1190",
+        "audit_status": "REVIEW",
+        "metrics": ["cashier_1h_override_rate", "cashier_1h_total_discount_usd"]
+      }
+    },
+    {
+      "id": "UC_2_1a",
+      "category": "Warranty Transaction Triage",
+      "prompt": "Check transaction details for TXN-20260312-0015811 and show the warranty coverage policy for the purchased item.",
+      "dispatch_mode": "SINGLE_TOOL",
+      "expected_tools": ["cymbal_analytics_tool"],
+      "expected_entities": {
+        "transaction_id": "TXN-20260312-0015811",
+        "product_name": "Samsung Galaxy Watch4 Classic LTE",
+        "warranty_duration_months": 24
+      }
+    },
+    {
+      "id": "UC_2_2",
+      "category": "Dual Cashier Baseline Comparison",
+      "prompt": "What is Cashier CASH_1190's live 1-hour override rate right now, compared to their 7-day historical override baseline?",
+      "dispatch_mode": "PARALLEL_DISPATCH",
+      "expected_tools": ["read_cashier_realtime_alerts", "cymbal_analytics_tool"],
+      "expected_entities": {
+        "live_source": "Cloud Bigtable (operations-db)",
+        "historical_source": "BigQuery (historical_transactional_data)",
+        "comparison_type": "side_by_side"
+      }
+    },
+    {
+      "id": "UC_2_3",
+      "category": "Cross-Cloud Offender Audit",
+      "prompt": "Show cashiers with active cashier promo abuse alerts in the last 7 days and retrieve checkout logs for the top offender.",
+      "dispatch_mode": "SEQUENTIAL_MULTI_TURN",
+      "expected_tools": ["cymbal_analytics_tool", "cymbal_analytics_tool"],
+      "expected_entities": {
+        "step_1_source": "GCP pos_anomaly_alerts",
+        "step_2_source": "AWS S3 silver_pos_transactions via BigLake",
+        "top_offender": "CASH_1190"
+      }
+    }
+  ]
+}
