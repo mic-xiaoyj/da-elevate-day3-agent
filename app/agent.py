@@ -7,13 +7,20 @@ Decoupled 3-Toolset ADK Coordinator Agent orchestrating:
 """
 
 import os
+import logging
 from dotenv import load_dotenv
 from google.adk.agents import Agent
+from google.adk.apps import App
+from google.adk.plugins.bigquery_agent_analytics_plugin import (
+    BigQueryAgentAnalyticsPlugin,
+    BigQueryLoggerConfig,
+)
 from app.utils.logging import setup_logging
 
 # Initialize environment and structured JSON logging
 load_dotenv()
 setup_logging()
+logger = logging.getLogger(__name__)
 
 from app.tools.analytics_tool import cymbal_analytics_tool
 from app.tools.rag_tool import pos_troubleshooting_rag_tool
@@ -88,7 +95,9 @@ active_tools = [
     read_cashier_realtime_alerts,
     read_pos_transactions_enriched,
 ]
-if bigtable_mcp_toolset is not None:
+# bigtable_mcp_toolset is represented by callable wrappers (read_cashier_realtime_alerts, read_pos_transactions_enriched)
+# for compatibility with Vertex AI Agent Runtime and eval inference runners.
+if os.environ.get("ENABLE_RAW_MCP_TOOLSET", "false").lower() == "true" and bigtable_mcp_toolset is not None:
     active_tools.append(bigtable_mcp_toolset)
 
 root_agent = Agent(
@@ -100,3 +109,40 @@ root_agent = Agent(
 )
 
 cymbal_operations_agent = root_agent
+
+# Initialize BigQuery Agent Analytics Telemetry Plugin
+telemetry_plugin = None
+try:
+    project_id = (
+        os.environ.get("PROJECT_ID")
+        or os.environ.get("GOOGLE_CLOUD_PROJECT")
+        or "xiaoyj-lab"
+    )
+    dataset_id = os.environ.get("BQ_TELEMETRY_DATASET", "agent_telemetry")
+    region = os.environ.get("REGION", "us-central1")
+    table_id = os.environ.get("BQ_TELEMETRY_TABLE", "events")
+
+    telemetry_plugin = BigQueryAgentAnalyticsPlugin(
+        project_id=project_id,
+        dataset_id=dataset_id,
+        table_id=table_id,
+        location=region,
+        config=BigQueryLoggerConfig(
+            create_views=True,
+            flush_on_run_end=True,
+            auto_schema_upgrade=True,
+        ),
+    )
+    logger.info(
+        f"BigQueryAgentAnalyticsPlugin initialized for {project_id}.{dataset_id}.{table_id}"
+    )
+except Exception as e:
+    logger.warning(f"Could not initialize BigQueryAgentAnalyticsPlugin: {e}")
+
+plugins = [telemetry_plugin] if telemetry_plugin is not None else []
+
+app = App(
+    name="cymbal_operations_agent",
+    root_agent=root_agent,
+    plugins=plugins,
+)
