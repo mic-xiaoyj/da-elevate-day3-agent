@@ -30,7 +30,7 @@ from app.tools.bigtable_tool import (
     read_pos_transactions_enriched,
 )
 
-MODEL_NAME = os.environ.get("COORDINATOR_MODEL", "gemini-3.6-flash")
+MODEL_NAME = os.environ.get("COORDINATOR_MODEL", "gemini-2.5-flash")
 
 COORDINATOR_INSTRUCTIONS = """
 You are `cymbal_operations_agent`, the enterprise operational AI coordinator for Cymbal Retail store operations, hardware reliability, and fraud/audit investigation.

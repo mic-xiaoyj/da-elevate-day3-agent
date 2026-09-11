@@ -24,7 +24,7 @@ class JSONFormatter(logging.Formatter):
 
 def setup_logging(level: int = logging.INFO) -> None:
     """Configures root logger with structured JSON formatting."""
-    handler = logging.StreamHandler(sys.stdout)
+    handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(JSONFormatter())
     root_logger = logging.getLogger()
     root_logger.setLevel(level)
